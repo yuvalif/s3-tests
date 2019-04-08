@@ -1056,8 +1056,11 @@ def test_object_requestid_matches_header_on_error():
     # get http response after failed request
     client.meta.events.register('after-call.s3.GetObject', get_http_response)
     e = assert_raises(ClientError, client.get_object, Bucket=bucket_name, Key='bar')
+
     response_body = http_response['_content']
-    request_id = re.search(r'<RequestId>(.*)</RequestId>', response_body.encode('utf-8')).group(1)
+    resp_body_xml = ET.fromstring(response_body)
+    request_id = resp_body_xml.find('.//RequestId').text
+
     assert request_id is not None
     eq(request_id, e.response['ResponseMetadata']['RequestId'])
 
@@ -1148,6 +1151,8 @@ def test_object_write_expires():
 def _get_body(response):
     body = response['Body']
     got = body.read()
+    if type(got) is bytes:
+        got = got.decode()
     return got
 
 @attr(resource='object')
@@ -1232,7 +1237,10 @@ def test_object_set_get_unicode_metadata():
     client.put_object(Bucket=bucket_name, Key='foo', Body='bar')
 
     response = client.get_object(Bucket=bucket_name, Key='foo')
-    got = response['Metadata']['meta1'].decode('utf-8')
+    # TODO: figure out how to decode 'meta1' from unicode
+    #got = response['Metadata']['meta1'].decode('utf-8')
+    got = response['Metadata']['meta1']
+    print(response['Metadata']['meta1'])
     eq(got, "Hello World\xe9")
 
 @attr(resource='object.metadata')
