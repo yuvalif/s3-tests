@@ -1231,32 +1231,17 @@ def test_object_set_get_unicode_metadata():
     client = get_client()
 
     def set_unicode_metadata(**kwargs):
-        kwargs['params']['headers']['x-amz-meta-meta1'] = "Hello World\xe9"
+        kwargs['params']['headers']['x-amz-meta-meta1'] = u"Hello World\xe9"
 
     client.meta.events.register('before-call.s3.PutObject', set_unicode_metadata)
     client.put_object(Bucket=bucket_name, Key='foo', Body='bar')
 
     response = client.get_object(Bucket=bucket_name, Key='foo')
-    # TODO: figure out how to decode 'meta1' from unicode
-    #got = response['Metadata']['meta1'].decode('utf-8')
+    got = response['Metadata']['meta1'].decode('utf-8')
     got = response['Metadata']['meta1']
-    print(response['Metadata']['meta1'])
-    eq(got, "Hello World\xe9")
-
-@attr(resource='object.metadata')
-@attr(method='put')
-@attr(operation='metadata write/re-write')
-@attr(assertion='non-UTF-8 values detected, but preserved')
-@attr('fails_strict_rfc2616')
-def test_object_set_get_non_utf8_metadata():
-    bucket_name = get_new_bucket()
-    client = get_client()
-    metadata_dict = {'meta1': '\x04mymeta'}
-    client.put_object(Bucket=bucket_name, Key='foo', Body='bar', Metadata=metadata_dict)
-
-    response = client.get_object(Bucket=bucket_name, Key='foo')
-    got = response['Metadata']['meta1']
-    eq(got, '=?UTF-8?Q?=04mymeta?=')
+    print(got)
+    print(u"Hello World\xe9")
+    eq(got, u"Hello World\xe9")
 
 def _set_get_metadata_unreadable(metadata, bucket_name=None):
     """
@@ -1264,80 +1249,63 @@ def _set_get_metadata_unreadable(metadata, bucket_name=None):
     includes some interesting characters), and return a list
     containing the stored value AND the encoding with which it
     was returned.
-    """
-    got = _set_get_metadata(metadata, bucket_name)
-    got = decode_header(got)
-    return got
 
+    This should return a 400 bad request because the webserver
+    rejects the request.
+    """
+    bucket_name = get_new_bucket()
+    client = get_client()
+    metadata_dict = {'meta1': metadata}
+    e = assert_raises(ClientError, client.put_object, Bucket=bucket_name, Key='bar', Metadata=metadata_dict)
+    return e
+
+@attr(resource='object.metadata')
+@attr(method='put')
+@attr(operation='metadata write/re-write')
+@attr(assertion='non-UTF-8 values detected, but rejected by webserver')
+@attr('fails_strict_rfc2616')
+@attr(assertion='fails 400')
+def test_object_set_get_non_utf8_metadata():
+    metadata = '\x04mymeta'
+    e = _set_get_metadata_unreadable(metadata)
+    status, error_code = _get_status_and_error_code(e.response)
+    eq(status, 400 or 403)
 
 @attr(resource='object.metadata')
 @attr(method='put')
 @attr(operation='metadata write')
-@attr(assertion='non-priting prefixes noted and preserved')
+@attr(assertion='non-printing prefixes rejected by webserver')
 @attr('fails_strict_rfc2616')
+@attr(assertion='fails 400')
 def test_object_set_get_metadata_empty_to_unreadable_prefix():
     metadata = '\x04w'
-    got = _set_get_metadata_unreadable(metadata)
-    eq(got, [(metadata, 'utf-8')])
+    e = _set_get_metadata_unreadable(metadata)
+    status, error_code = _get_status_and_error_code(e.response)
+    eq(status, 400 or 403)
 
 @attr(resource='object.metadata')
 @attr(method='put')
 @attr(operation='metadata write')
-@attr(assertion='non-priting suffixes noted and preserved')
+@attr(assertion='non-printing suffixes rejected by webserver')
 @attr('fails_strict_rfc2616')
+@attr(assertion='fails 400')
 def test_object_set_get_metadata_empty_to_unreadable_suffix():
     metadata = 'h\x04'
-    got = _set_get_metadata_unreadable(metadata)
-    eq(got, [(metadata, 'utf-8')])
+    e = _set_get_metadata_unreadable(metadata)
+    status, error_code = _get_status_and_error_code(e.response)
+    eq(status, 400 or 403)
 
 @attr(resource='object.metadata')
 @attr(method='put')
 @attr(operation='metadata write')
-@attr(assertion='non-priting in-fixes noted and preserved')
+@attr(assertion='non-priting in-fixes rejected by webserver')
 @attr('fails_strict_rfc2616')
+@attr(assertion='fails 400')
 def test_object_set_get_metadata_empty_to_unreadable_infix():
     metadata = 'h\x04w'
-    got = _set_get_metadata_unreadable(metadata)
-    eq(got, [(metadata, 'utf-8')])
-
-@attr(resource='object.metadata')
-@attr(method='put')
-@attr(operation='metadata re-write')
-@attr(assertion='non-priting prefixes noted and preserved')
-@attr('fails_strict_rfc2616')
-def test_object_set_get_metadata_overwrite_to_unreadable_prefix():
-    metadata = '\x04w'
-    got = _set_get_metadata_unreadable(metadata)
-    eq(got, [(metadata, 'utf-8')])
-    metadata2 = '\x05w'
-    got2 = _set_get_metadata_unreadable(metadata2)
-    eq(got2, [(metadata2, 'utf-8')])
-
-@attr(resource='object.metadata')
-@attr(method='put')
-@attr(operation='metadata re-write')
-@attr(assertion='non-priting suffixes noted and preserved')
-@attr('fails_strict_rfc2616')
-def test_object_set_get_metadata_overwrite_to_unreadable_suffix():
-    metadata = 'h\x04'
-    got = _set_get_metadata_unreadable(metadata)
-    eq(got, [(metadata, 'utf-8')])
-    metadata2 = 'h\x05'
-    got2 = _set_get_metadata_unreadable(metadata2)
-    eq(got2, [(metadata2, 'utf-8')])
-
-@attr(resource='object.metadata')
-@attr(method='put')
-@attr(operation='metadata re-write')
-@attr(assertion='non-priting in-fixes noted and preserved')
-@attr('fails_strict_rfc2616')
-def test_object_set_get_metadata_overwrite_to_unreadable_infix():
-    metadata = 'h\x04w'
-    got = _set_get_metadata_unreadable(metadata)
-    eq(got, [(metadata, 'utf-8')])
-    metadata2 = 'h\x05w'
-    got2 = _set_get_metadata_unreadable(metadata2)
-    eq(got2, [(metadata2, 'utf-8')])
+    e = _set_get_metadata_unreadable(metadata)
+    status, error_code = _get_status_and_error_code(e.response)
+    eq(status, 400 or 403)
 
 @attr(resource='object')
 @attr(method='put')
