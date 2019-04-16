@@ -11,8 +11,6 @@ import datetime
 import threading
 import re
 import pytz
-from io import StringIO
-import six
 from collections import OrderedDict
 import requests
 import json
@@ -5159,7 +5157,6 @@ def test_object_copy_zero_size():
     bucket_name = _create_objects(keys=[key])
     fp_a = FakeWriteFile(0, '')
     client = get_client()
-
     client.put_object(Bucket=bucket_name, Key=key, Body=fp_a)
 
     copy_source = {'Bucket': bucket_name, 'Key': key}
@@ -5334,7 +5331,7 @@ def test_object_copy_retaining_metadata():
         content_type = 'audio/ogg'
 
         metadata = {'key1': 'value1', 'key2': 'value2'}
-        client.put_object(Bucket=bucket_name, Key='foo123bar', Metadata=metadata, ContentType=content_type, Body=str(bytearray(size)))
+        client.put_object(Bucket=bucket_name, Key='foo123bar', Metadata=metadata, ContentType=content_type, Body=bytearray(size))
 
         copy_source = {'Bucket': bucket_name, 'Key': 'foo123bar'}
         client.copy_object(Bucket=bucket_name, CopySource=copy_source, Key='bar321foo')
@@ -5342,6 +5339,7 @@ def test_object_copy_retaining_metadata():
         response = client.get_object(Bucket=bucket_name, Key='bar321foo')
         eq(content_type, response['ContentType'])
         eq(metadata, response['Metadata'])
+        body = _get_body(response)
         eq(size, response['ContentLength'])
 
 @attr(resource='object')
@@ -5354,7 +5352,7 @@ def test_object_copy_replacing_metadata():
         content_type = 'audio/ogg'
 
         metadata = {'key1': 'value1', 'key2': 'value2'}
-        client.put_object(Bucket=bucket_name, Key='foo123bar', Metadata=metadata, ContentType=content_type, Body=str(bytearray(size)))
+        client.put_object(Bucket=bucket_name, Key='foo123bar', Metadata=metadata, ContentType=content_type, Body=bytearray(size))
 
         metadata = {'key3': 'value3', 'key2': 'value2'}
         content_type = 'audio/mpeg'
@@ -5399,8 +5397,9 @@ def test_object_copy_versioned_bucket():
     bucket_name = get_new_bucket()
     client = get_client()
     check_configure_versioning_retry(bucket_name, "Enabled", "Enabled")
-    size = 1*1024*124
-    data = str(bytearray(size))
+    size = 1*5
+    data = bytearray(size)
+    data_str = data.decode()
     key1 = 'foo123bar'
     client.put_object(Bucket=bucket_name, Key=key1, Body=data)
 
@@ -5413,7 +5412,7 @@ def test_object_copy_versioned_bucket():
     client.copy_object(Bucket=bucket_name, CopySource=copy_source, Key=key2)
     response = client.get_object(Bucket=bucket_name, Key=key2)
     body = _get_body(response)
-    eq(data, body)
+    eq(data_str, body)
     eq(size, response['ContentLength'])
 
 
@@ -5424,7 +5423,7 @@ def test_object_copy_versioned_bucket():
     client.copy_object(Bucket=bucket_name, CopySource=copy_source, Key=key3)
     response = client.get_object(Bucket=bucket_name, Key=key3)
     body = _get_body(response)
-    eq(data, body)
+    eq(data_str, body)
     eq(size, response['ContentLength'])
 
     # copy to another versioned bucket
@@ -5435,7 +5434,7 @@ def test_object_copy_versioned_bucket():
     client.copy_object(Bucket=bucket_name2, CopySource=copy_source, Key=key4)
     response = client.get_object(Bucket=bucket_name2, Key=key4)
     body = _get_body(response)
-    eq(data, body)
+    eq(data_str, body)
     eq(size, response['ContentLength'])
 
     # copy to another non versioned bucket
@@ -5445,7 +5444,7 @@ def test_object_copy_versioned_bucket():
     client.copy_object(Bucket=bucket_name3, CopySource=copy_source, Key=key5)
     response = client.get_object(Bucket=bucket_name3, Key=key5)
     body = _get_body(response)
-    eq(data, body)
+    eq(data_str, body)
     eq(size, response['ContentLength'])
 
     # copy from a non versioned bucket
@@ -5454,7 +5453,7 @@ def test_object_copy_versioned_bucket():
     client.copy_object(Bucket=bucket_name, CopySource=copy_source, Key=key6)
     response = client.get_object(Bucket=bucket_name, Key=key6)
     body = _get_body(response)
-    eq(data, body)
+    eq(data_str, body)
     eq(size, response['ContentLength'])
 
 def generate_random(size, part_size=5*1024*1024):
@@ -5622,7 +5621,8 @@ def _create_key_with_random_content(keyname, size=7*1024*1024, bucket_name=None,
     if client == None:
         client = get_client()
 
-    data = StringIO(str(next(generate_random(size, size))))
+    data_str = str(next(generate_random(size, size)))
+    data = bytes(data_str, 'utf-8')
     client.put_object(Bucket=bucket_name, Key=keyname, Body=data)
 
     return bucket_name
@@ -6006,12 +6006,12 @@ def _do_test_multipart_upload_contents(bucket_name, key, num_parts):
     parts = []
 
     for part_num in range(0, num_parts):
-        part = StringIO(payload)
+        part = bytes(payload, 'utf-8')
         response = client.upload_part(UploadId=upload_id, Bucket=bucket_name, Key=key, PartNumber=part_num+1, Body=part)
         parts.append({'ETag': response['ETag'].strip('"'), 'PartNumber': part_num+1})
 
     last_payload = '123'*1024*1024
-    last_part = StringIO(last_payload)
+    last_part = bytes(last_payload, 'utf-8')
     response = client.upload_part(UploadId=upload_id, Bucket=bucket_name, Key=key, PartNumber=num_parts+1, Body=last_part)
     parts.append({'ETag': response['ETag'].strip('"'), 'PartNumber': num_parts+1})
 
@@ -6145,7 +6145,7 @@ def test_multipart_upload_missing_part():
     upload_id = response['UploadId']
 
     parts = []
-    response = client.upload_part(UploadId=upload_id, Bucket=bucket_name, Key=key, PartNumber=1, Body=StringIO('\x00'))
+    response = client.upload_part(UploadId=upload_id, Bucket=bucket_name, Key=key, PartNumber=1, Body=bytes('\x00', 'utf-8'))
     # 'PartNumber should be 1'
     parts.append({'ETag': response['ETag'].strip('"'), 'PartNumber': 9999})
 
@@ -6167,7 +6167,7 @@ def test_multipart_upload_incorrect_etag():
     upload_id = response['UploadId']
 
     parts = []
-    response = client.upload_part(UploadId=upload_id, Bucket=bucket_name, Key=key, PartNumber=1, Body=StringIO('\x00'))
+    response = client.upload_part(UploadId=upload_id, Bucket=bucket_name, Key=key, PartNumber=1, Body=bytes('\x00', 'utf-8'))
     # 'ETag' should be "93b885adfe0da089cdf634904fd59f71"
     parts.append({'ETag': "ffffffffffffffffffffffffffffffff", 'PartNumber': 1})
 
@@ -6181,11 +6181,13 @@ def _simple_http_req_100_cont(host, port, is_secure, method, resource):
     Send the specified request w/expect 100-continue
     and await confirmation.
     """
-    req = '{method} {resource} HTTP/1.1\r\nHost: {host}\r\nAccept-Encoding: identity\r\nContent-Length: 123\r\nExpect: 100-continue\r\n\r\n'.format(
+    req_str = '{method} {resource} HTTP/1.1\r\nHost: {host}\r\nAccept-Encoding: identity\r\nContent-Length: 123\r\nExpect: 100-continue\r\n\r\n'.format(
             method=method,
             resource=resource,
             host=host,
             )
+
+    req = bytes(req_str, 'utf-8')
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     if is_secure:
@@ -6201,7 +6203,8 @@ def _simple_http_req_100_cont(host, port, is_secure, method, resource):
         print('most likely server doesn\'t support 100-continue')
 
     s.close()
-    l = data.split(' ')
+    data_str = data.decode()
+    l = data_str.split(' ')
 
     assert l[0].startswith('HTTP')
 
@@ -6416,7 +6419,7 @@ class FakeFile(object):
     """
     def __init__(self, char='A', interrupt=None):
         self.offset = 0
-        self.char = char
+        self.char = bytes(char, 'utf-8')
         self.interrupt = interrupt
 
     def seek(self, offset, whence=os.SEEK_SET):
@@ -6487,7 +6490,7 @@ class FakeFileVerifier(object):
         if self.char == None:
             self.char = data[0]
         self.size += size
-        eq(data, self.char*size)
+        eq(data.decode(), self.char*size)
 
 def _verify_atomic_key_data(bucket_name, key, size=-1, char=None):
     """
@@ -6562,13 +6565,14 @@ def _test_atomic_write(file_size):
     fp_a = FakeWriteFile(file_size, 'A')
     client.put_object(Bucket=bucket_name, Key=objname, Body=fp_a)
 
+
     # verify A's
     _verify_atomic_key_data(bucket_name, objname, file_size, 'A')
 
     # create <file_size> file of B's
     # but try to verify the file before we finish writing all the B's
     fp_b = FakeWriteFile(file_size, 'B',
-        lambda: _verify_atomic_key_data(bucket_name, objname, file_size)
+        lambda: _verify_atomic_key_data(bucket_name, objname, file_size, 'A')
         )
 
     client.put_object(Bucket=bucket_name, Key=objname, Body=fp_b)
@@ -6619,7 +6623,7 @@ def _test_atomic_dual_write(file_size):
     client.put_object(Bucket=bucket_name, Key=objname, Body=fp_b)
 
     # verify the file
-    _verify_atomic_key_data(bucket_name, objname, file_size)
+    _verify_atomic_key_data(bucket_name, objname, file_size, 'B')
 
 @attr(resource='object')
 @attr(method='put')
@@ -6659,7 +6663,7 @@ def _test_atomic_conditional_write(file_size):
     client.put_object(Bucket=bucket_name, Key=objname, Body=fp_a)
 
     fp_b = FakeWriteFile(file_size, 'B',
-        lambda: _verify_atomic_key_data(bucket_name, objname, file_size)
+        lambda: _verify_atomic_key_data(bucket_name, objname, file_size, 'A')
         )
 
     # create <file_size> file of B's
@@ -6864,12 +6868,15 @@ def test_ranged_request_response_code():
     eq(response['ResponseMetadata']['HTTPHeaders']['content-range'], 'bytes 4-7/11')
     eq(response['ResponseMetadata']['HTTPStatusCode'], 206)
 
+def _generate_random_string(size):
+    return ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(size))
+
 @attr(resource='object')
 @attr(method='get')
 @attr(operation='range')
 @attr(assertion='returns correct data, 206')
 def test_ranged_big_request_response_code():
-    content = os.urandom(8*1024*1024)
+    content = _generate_random_string(8*1024*1024)
 
     bucket_name = get_new_bucket()
     client = get_client()
