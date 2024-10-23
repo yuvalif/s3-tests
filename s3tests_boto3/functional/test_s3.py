@@ -14130,6 +14130,60 @@ def test_bucket_logging_put_objects_versioned():
     _bucket_logging_put_objects(True)
 
 
+@pytest.mark.bucket_logging
+def test_bucket_logging_put_concurrency():
+    src_bucket_name = get_new_bucket()
+    log_bucket_name = get_new_bucket_name()
+    log_bucket = get_new_bucket_resource(name=log_bucket_name)
+    client = get_client(client_config=botocore.config.Config(max_pool_connections=50))
+    has_extensions = _has_bucket_logging_extension()
+    
+    # minimal configuration
+    logging_enabled = {'TargetBucket': log_bucket_name, 'TargetPrefix': 'log/'}
+    if has_extensions:
+        logging_enabled['ObjectRollTime'] = 5
+        logging_enabled['LoggingType'] = 'Journal'
+    response = client.put_bucket_logging(Bucket=src_bucket_name, BucketLoggingStatus={
+        'LoggingEnabled': logging_enabled,
+    })
+    assert response['ResponseMetadata']['HTTPStatusCode'] == 200
+
+    num_keys = 50
+    t = []
+    for i in range(num_keys):
+        name = 'myobject'+str(i)    
+        thr = threading.Thread(target = client.put_object, 
+                               kwargs={'Bucket': src_bucket_name, 'Key': name, 'Body': randcontent()})
+        thr.start()
+        t.append(thr)
+    _do_wait_completion(t)
+
+    response = client.list_objects_v2(Bucket=src_bucket_name)
+    src_keys = _get_keys(response)
+
+    time.sleep(5)
+    t = []
+    for i in range(num_keys):
+        thr = threading.Thread(target = client.put_object, 
+                               kwargs={'Bucket': src_bucket_name, 'Key': 'dummy', 'Body': 'dummy'})
+        thr.start()
+        t.append(thr)
+    _do_wait_completion(t)
+
+    response = client.list_objects_v2(Bucket=log_bucket_name)
+    keys = _get_keys(response)
+    assert len(keys) == 1
+
+    record_type = 'Standard' if not has_extensions else 'Journal'
+    
+    for key in keys:
+        logger.info('logging object: %s', key)
+        assert key.startswith('log/')
+        response = client.get_object(Bucket=log_bucket_name, Key=key)
+        body = _get_body(response)
+        assert _verify_records(body, src_bucket_name, 'REST.PUT.put_obj', src_keys, record_type, num_keys)
+
+
 def _bucket_logging_delete_objects(versioned):
     src_bucket_name = get_new_bucket()
     if versioned:
