@@ -13759,6 +13759,66 @@ def _has_bucket_logging_extension():
     return True
 
 
+import shlex
+
+def _parse_standard_log_record(record):
+    record = record.replace('[', '"').replace(']', '"')
+    chunks = shlex.split(record)
+    assert len(chunks) == 26
+    return json.dumps({
+            'BucketOwner':      chunks[0],
+            'BucketName':       chunks[1],
+            'RequestDateTime':  chunks[2],
+            'RemoteIP':         chunks[3],
+            'Requester':        chunks[4],
+            'RequestID':        chunks[5],
+            'Operation':        chunks[6],
+            'Key':              chunks[7],
+            'RequestURI':       chunks[8],
+            'HTTPStatus':       chunks[9],
+            'ErrorCode':        chunks[10],
+            'BytesSent':        chunks[11],
+            'ObjectSize':       chunks[12],
+            'TotalTime':        chunks[13],
+            'TurnAroundTime':   chunks[14],
+            'Referrer':         chunks[15],
+            'UserAgent':        chunks[16],
+            'VersionID':        chunks[17],
+            'HostID':           chunks[18],
+            'SigVersion':       chunks[19],
+            'CipherSuite':      chunks[20],
+            'AuthType':         chunks[21],
+            'HostHeader':       chunks[22],
+            'TLSVersion':       chunks[23],
+            'AccessPointARN':   chunks[24],
+            'ACLRequired':      chunks[25],
+            }, indent=4)
+
+
+def _parse_journal_log_record(record):
+    record = record.replace('[', '"').replace(']', '"')
+    chunks = shlex.split(record)
+    assert len(chunks) == 8
+    return json.dumps({
+            'BucketOwner':      chunks[0],
+            'BucketName':       chunks[1],
+            'RequestDateTime':  chunks[2],
+            'Operation':        chunks[3],
+            'Key':              chunks[4],
+            'ObjectSize':       chunks[5],
+            'VersionID':        chunks[6],
+            'ETAG':             chunks[7],
+            }, indent=4)
+
+def _parse_log_record(record, record_type):
+    if record_type == 'Standard':
+        return _parse_standard_log_record(record)
+    elif record_type == 'Journal':
+        return _parse_journal_log_record(record)
+    else:
+        assert False, 'unknown log record type'
+
+
 @pytest.mark.bucket_logging
 def test_put_bucket_logging():
     src_bucket_name = get_new_bucket_name()
@@ -13987,24 +14047,33 @@ def test_put_bucket_logging_extensions():
     assert response['LoggingEnabled'] == logging_enabled
 
 
-def _verify_records(records, bucket_name, event_type, src_keys):
+import logging
+
+logger = logging.getLogger(__name__)
+
+def _verify_records(records, bucket_name, event_type, src_keys, record_type, expected_count):
     keys_found = []
     for record in iter(records.splitlines()):
-        print('bucket log record:', record)
+        logger.info('bucket log record: %s', _parse_log_record(record, record_type))
         if bucket_name in record and event_type in record:
             for key in src_keys:
                 if key in record:
                     keys_found.append(key)
                     break
-    print('keys found in bucket log:', keys_found)
-    print('keys from the source bucket:', src_keys)
-    return len(keys_found) == len(src_keys)
+    logger.info('keys found in bucket log: %s', str(keys_found))
+    logger.info('keys from the source bucket: %s', str(src_keys))
+    return len(keys_found) == expected_count
+
+def randcontent():
+    letters = string.ascii_lowercase
+    length = random.randint(10, 1024)
+    return ''.join(random.choice(letters) for i in range(length))
 
 
-@pytest.mark.bucket_logging
-def test_bucket_logging_put_objects():
-    src_bucket_name = get_new_bucket_name()
-    src_bucket = get_new_bucket_resource(name=src_bucket_name)
+def _bucket_logging_put_objects(versioned):
+    src_bucket_name = get_new_bucket()
+    if versioned:
+        check_configure_versioning_retry(src_bucket_name, "Enabled", "Enabled")
     log_bucket_name = get_new_bucket_name()
     log_bucket = get_new_bucket_resource(name=log_bucket_name)
     client = get_client()
@@ -14023,7 +14092,14 @@ def test_bucket_logging_put_objects():
     num_keys = 5
     for j in range(num_keys):
         name = 'myobject'+str(j)    
-        client.put_object(Bucket=src_bucket_name, Key=name, Body=name)
+        client.put_object(Bucket=src_bucket_name, Key=name, Body=randcontent())
+        if versioned:
+            client.put_object(Bucket=src_bucket_name, Key=name, Body=randcontent())
+
+    if versioned:
+        expected_count = 2*num_keys
+    else:
+        expected_count = num_keys
 
     response = client.list_objects_v2(Bucket=src_bucket_name)
     src_keys = _get_keys(response)
@@ -14034,18 +14110,30 @@ def test_bucket_logging_put_objects():
     response = client.list_objects_v2(Bucket=log_bucket_name)
     keys = _get_keys(response)
     assert len(keys) == 1
+
+    record_type = 'Standard' if not has_extensions else 'Journal'
     
     for key in keys:
         assert key.startswith('log/')
         response = client.get_object(Bucket=log_bucket_name, Key=key)
         body = _get_body(response)
-        assert _verify_records(body, src_bucket_name, 'REST.PUT.put_obj', src_keys)
+        assert _verify_records(body, src_bucket_name, 'REST.PUT.put_obj', src_keys, record_type, expected_count)
 
 
 @pytest.mark.bucket_logging
-def test_bucket_logging_delete_objects():
-    src_bucket_name = get_new_bucket_name()
-    src_bucket = get_new_bucket_resource(name=src_bucket_name)
+def test_bucket_logging_put_objects():
+    _bucket_logging_put_objects(False)
+
+
+@pytest.mark.bucket_logging
+def test_bucket_logging_put_objects_versioned():
+    _bucket_logging_put_objects(True)
+
+
+def _bucket_logging_delete_objects(versioned):
+    src_bucket_name = get_new_bucket()
+    if versioned:
+        check_configure_versioning_retry(src_bucket_name, "Enabled", "Enabled")
     log_bucket_name = get_new_bucket_name()
     log_bucket = get_new_bucket_resource(name=log_bucket_name)
     client = get_client()
@@ -14054,7 +14142,9 @@ def test_bucket_logging_delete_objects():
     num_keys = 5
     for j in range(num_keys):
         name = 'myobject'+str(j)    
-        client.put_object(Bucket=src_bucket_name, Key=name, Body=name)
+        client.put_object(Bucket=src_bucket_name, Key=name, Body=randcontent())
+        if versioned:
+            client.put_object(Bucket=src_bucket_name, Key=name, Body=randcontent())
 
     # minimal configuration
     logging_enabled = {'TargetBucket': log_bucket_name, 'TargetPrefix': 'log/'}
@@ -14069,6 +14159,9 @@ def test_bucket_logging_delete_objects():
     response = client.list_objects_v2(Bucket=src_bucket_name)
     src_keys = _get_keys(response)
     for key in src_keys:
+        if versioned:
+            response = client.head_object(Bucket=src_bucket_name, Key=key)
+            client.delete_object(Bucket=src_bucket_name, Key=key, VersionId=response['VersionId'])
         client.delete_object(Bucket=src_bucket_name, Key=key)
 
     time.sleep(5)
@@ -14078,17 +14171,34 @@ def test_bucket_logging_delete_objects():
     keys = _get_keys(response)
     assert len(keys) == 1
     
+    if versioned:
+        expected_count = 2*num_keys
+    else:
+        expected_count = num_keys
+
     key = keys[0]
     assert key.startswith('log/')
     response = client.get_object(Bucket=log_bucket_name, Key=key)
     body = _get_body(response)
-    assert _verify_records(body, src_bucket_name, 'REST.DELETE.delete_obj', src_keys)
+    record_type = 'Standard' if not has_extensions else 'Journal'
+    assert _verify_records(body, src_bucket_name, 'REST.DELETE.delete_obj', src_keys, record_type, expected_count)
 
 
 @pytest.mark.bucket_logging
-def test_bucket_logging_get_objects():
-    src_bucket_name = get_new_bucket_name()
-    src_bucket = get_new_bucket_resource(name=src_bucket_name)
+def test_bucket_logging_delete_objects():
+    _bucket_logging_delete_objects(False)
+
+
+@pytest.mark.bucket_logging
+def test_bucket_logging_delete_objects_versioned():
+    _bucket_logging_delete_objects(True)
+
+
+@pytest.mark.bucket_logging
+def _bucket_logging_get_objects(versioned):
+    src_bucket_name = get_new_bucket()
+    if versioned:
+        check_configure_versioning_retry(src_bucket_name, "Enabled", "Enabled")
     log_bucket_name = get_new_bucket_name()
     log_bucket = get_new_bucket_resource(name=log_bucket_name)
     client = get_client()
@@ -14097,7 +14207,9 @@ def test_bucket_logging_get_objects():
     num_keys = 5
     for j in range(num_keys):
         name = 'myobject'+str(j)    
-        client.put_object(Bucket=src_bucket_name, Key=name, Body=name)
+        client.put_object(Bucket=src_bucket_name, Key=name, Body=randcontent())
+        if versioned:
+            client.put_object(Bucket=src_bucket_name, Key=name, Body=randcontent())
 
     # minimal configuration
     logging_enabled = {'TargetBucket': log_bucket_name, 'TargetPrefix': 'log/'}
@@ -14112,6 +14224,9 @@ def test_bucket_logging_get_objects():
     response = client.list_objects_v2(Bucket=src_bucket_name)
     src_keys = _get_keys(response)
     for key in src_keys:
+        if versioned:
+            response = client.head_object(Bucket=src_bucket_name, Key=key)
+            client.get_object(Bucket=src_bucket_name, Key=key, VersionId=response['VersionId'])
         client.get_object(Bucket=src_bucket_name, Key=key)
 
     time.sleep(5)
@@ -14121,17 +14236,33 @@ def test_bucket_logging_get_objects():
     keys = _get_keys(response)
     assert len(keys) == 1
     
+    if versioned:
+        expected_count = 2*num_keys
+    else:
+        expected_count = num_keys
+
     key = keys[0]
     assert key.startswith('log/')
     response = client.get_object(Bucket=log_bucket_name, Key=key)
     body = _get_body(response)
-    assert _verify_records(body, src_bucket_name, 'REST.GET.get_obj', src_keys)
+    assert _verify_records(body, src_bucket_name, 'REST.GET.get_obj', src_keys, 'Standard', expected_count)
 
 
 @pytest.mark.bucket_logging
-def test_bucket_logging_copy_objects():
-    src_bucket_name = get_new_bucket_name()
-    src_bucket = get_new_bucket_resource(name=src_bucket_name)
+def test_bucket_logging_get_objects():
+    _bucket_logging_get_objects(False)
+    
+
+@pytest.mark.bucket_logging
+def test_bucket_logging_get_objects_versioned():
+    _bucket_logging_get_objects(True)
+
+
+@pytest.mark.bucket_logging
+def _bucket_logging_copy_objects(versioned):
+    src_bucket_name = get_new_bucket()
+    if versioned:
+        check_configure_versioning_retry(src_bucket_name, "Enabled", "Enabled")
     log_bucket_name = get_new_bucket_name()
     log_bucket = get_new_bucket_resource(name=log_bucket_name)
     client = get_client()
@@ -14140,7 +14271,9 @@ def test_bucket_logging_copy_objects():
     num_keys = 5
     for j in range(num_keys):
         name = 'myobject'+str(j)    
-        client.put_object(Bucket=src_bucket_name, Key=name, Body=name)
+        client.put_object(Bucket=src_bucket_name, Key=name, Body=randcontent())
+        if versioned:
+            client.put_object(Bucket=src_bucket_name, Key=name, Body=randcontent())
 
     # minimal configuration
     logging_enabled = {'TargetBucket': log_bucket_name, 'TargetPrefix': 'log/'}
@@ -14168,13 +14301,25 @@ def test_bucket_logging_copy_objects():
     assert key.startswith('log/')
     response = client.get_object(Bucket=log_bucket_name, Key=key)
     body = _get_body(response)
-    assert _verify_records(body, src_bucket_name, 'REST.PUT.copy_obj', src_keys)
+    record_type = 'Standard' if not has_extensions else 'Journal'
+    assert _verify_records(body, src_bucket_name, 'REST.PUT.copy_obj', src_keys, record_type, num_keys)
 
 
 @pytest.mark.bucket_logging
-def test_bucket_logging_head_objects():
-    src_bucket_name = get_new_bucket_name()
-    src_bucket = get_new_bucket_resource(name=src_bucket_name)
+def test_bucket_logging_copy_objects():
+    _bucket_logging_copy_objects(False)
+
+
+@pytest.mark.bucket_logging
+def test_bucket_logging_copy_objects_versioned():
+    _bucket_logging_copy_objects(True)
+
+
+@pytest.mark.bucket_logging
+def _bucket_logging_head_objects(versioned):
+    src_bucket_name = get_new_bucket()
+    if versioned:
+        check_configure_versioning_retry(src_bucket_name, "Enabled", "Enabled")
     log_bucket_name = get_new_bucket_name()
     log_bucket = get_new_bucket_resource(name=log_bucket_name)
     client = get_client()
@@ -14183,7 +14328,7 @@ def test_bucket_logging_head_objects():
     num_keys = 5
     for j in range(num_keys):
         name = 'myobject'+str(j)    
-        client.put_object(Bucket=src_bucket_name, Key=name, Body=name)
+        client.put_object(Bucket=src_bucket_name, Key=name, Body=randcontent())
 
     logging_enabled = {'TargetBucket': log_bucket_name, 'TargetPrefix': 'log/'}
     if has_extensions:
@@ -14197,7 +14342,11 @@ def test_bucket_logging_head_objects():
     response = client.list_objects_v2(Bucket=src_bucket_name)
     src_keys = _get_keys(response)
     for key in src_keys:
-        client.head_object(Bucket=src_bucket_name, Key=key)
+        if versioned:
+            response = client.head_object(Bucket=src_bucket_name, Key=key)
+            client.head_object(Bucket=src_bucket_name, Key=key, VersionId=response['VersionId'])
+        else:
+            client.head_object(Bucket=src_bucket_name, Key=key)
 
     time.sleep(5)
     client.put_object(Bucket=src_bucket_name, Key='dummy', Body='dummy')
@@ -14206,17 +14355,33 @@ def test_bucket_logging_head_objects():
     keys = _get_keys(response)
     assert len(keys) == 1
     
+    if versioned:
+        expected_count = 2*num_keys
+    else:
+        expected_count = num_keys
+    
     key = keys[0]
     assert key.startswith('log/')
     response = client.get_object(Bucket=log_bucket_name, Key=key)
     body = _get_body(response)
-    assert _verify_records(body, src_bucket_name, 'REST.HEAD.get_obj', src_keys)
+    assert _verify_records(body, src_bucket_name, 'REST.HEAD.get_obj', src_keys, 'Standard', expected_count)
 
 
 @pytest.mark.bucket_logging
-def test_bucket_logging_mpu():
-    src_bucket_name = get_new_bucket_name()
-    src_bucket = get_new_bucket_resource(name=src_bucket_name)
+def test_bucket_logging_head_objects():
+    _bucket_logging_head_objects(False)
+
+
+@pytest.mark.bucket_logging
+def test_bucket_logging_head_objects_versioned():
+    _bucket_logging_head_objects(True)
+
+
+@pytest.mark.bucket_logging
+def _bucket_logging_mpu(versioned):
+    src_bucket_name = get_new_bucket()
+    if versioned:
+        check_configure_versioning_retry(src_bucket_name, "Enabled", "Enabled")
     log_bucket_name = get_new_bucket_name()
     log_bucket = get_new_bucket_resource(name=log_bucket_name)
     client = get_client()
@@ -14236,6 +14401,9 @@ def test_bucket_logging_mpu():
     objlen = 30 * 1024 * 1024
     (upload_id, data, parts) = _multipart_upload(bucket_name=src_bucket_name, key=src_key, size=objlen)
     client.complete_multipart_upload(Bucket=src_bucket_name, Key=src_key, UploadId=upload_id, MultipartUpload={'Parts': parts})
+    if versioned:
+        (upload_id, data, parts) = _multipart_upload(bucket_name=src_bucket_name, key=src_key, size=objlen)
+        client.complete_multipart_upload(Bucket=src_bucket_name, Key=src_key, UploadId=upload_id, MultipartUpload={'Parts': parts})
     
     time.sleep(5)
     client.put_object(Bucket=src_bucket_name, Key='dummy', Body='dummy')
@@ -14244,11 +14412,97 @@ def test_bucket_logging_mpu():
     keys = _get_keys(response)
     assert len(keys) == 1
     
+    if versioned:
+        expected_count = 2
+    else:
+        expected_count = 1
+
     key = keys[0]
     assert key.startswith('log/')
     response = client.get_object(Bucket=log_bucket_name, Key=key)
     body = _get_body(response)
-    assert _verify_records(body, src_bucket_name, 'REST.POST.complete_multipart', [src_key])
+    record_type = 'Standard' if not has_extensions else 'Journal'
+    assert _verify_records(body, src_bucket_name, 'REST.POST.complete_multipart', [src_key], record_type, expected_count)
+
+
+@pytest.mark.bucket_logging
+def test_bucket_logging_mpu():
+    _bucket_logging_mpu(False)
+
+
+@pytest.mark.bucket_logging
+def test_bucket_logging_mpu_versioned():
+    _bucket_logging_mpu(True)
+
+
+def _bucket_logging_multi_delete(versioned):
+    src_bucket_name = get_new_bucket()
+    if versioned:
+        check_configure_versioning_retry(src_bucket_name, "Enabled", "Enabled")
+    log_bucket_name = get_new_bucket_name()
+    log_bucket = get_new_bucket_resource(name=log_bucket_name)
+    client = get_client()
+    has_extensions = _has_bucket_logging_extension()
+
+    num_keys = 5
+    for j in range(num_keys):
+        name = 'myobject'+str(j)    
+        client.put_object(Bucket=src_bucket_name, Key=name, Body=randcontent())
+        if versioned:
+            client.put_object(Bucket=src_bucket_name, Key=name, Body=randcontent())
+
+    # minimal configuration
+    logging_enabled = {'TargetBucket': log_bucket_name, 'TargetPrefix': 'log/'}
+    if has_extensions:
+        logging_enabled['ObjectRollTime'] = 5
+        logging_enabled['LoggingType'] = 'Journal'
+    response = client.put_bucket_logging(Bucket=src_bucket_name, BucketLoggingStatus={
+        'LoggingEnabled': logging_enabled,
+    })
+
+    assert response['ResponseMetadata']['HTTPStatusCode'] == 200
+    response = client.list_objects_v2(Bucket=src_bucket_name)
+    src_keys = _get_keys(response)
+    if versioned:
+        response = client.list_object_versions(Bucket=src_bucket_name)
+        objs_list = []
+        for version in response['Versions']:
+            obj_dict = {'Key': version['Key'], 'VersionId': version['VersionId']}
+            objs_list.append(obj_dict)
+        objs_dict = {'Objects': objs_list}
+        client.delete_objects(Bucket=src_bucket_name, Delete=objs_dict)
+    else:
+        objs_dict = _make_objs_dict(key_names=src_keys)
+        client.delete_objects(Bucket=src_bucket_name, Delete=objs_dict)
+
+    time.sleep(5)
+    client.put_object(Bucket=src_bucket_name, Key='dummy', Body='dummy')
+
+    response = client.list_objects_v2(Bucket=log_bucket_name)
+    keys = _get_keys(response)
+    assert len(keys) == 1
+    
+    if versioned:
+        expected_count = 2*num_keys
+    else:
+        expected_count = num_keys
+
+    key = keys[0]
+    assert key.startswith('log/')
+    response = client.get_object(Bucket=log_bucket_name, Key=key)
+    body = _get_body(response)
+    record_type = 'Standard' if not has_extensions else 'Journal'
+    assert _verify_records(body, src_bucket_name, "REST.POST.multi_object_delete", src_keys, record_type, expected_count)
+
+
+@pytest.mark.bucket_logging
+def test_bucket_logging_multi_delete():
+    _bucket_logging_multi_delete(False)
+
+
+@pytest.mark.bucket_logging
+def test_bucket_logging_multi_delete_versioned():
+    _bucket_logging_multi_delete(True)
 
 
 def _bucket_logging_type(logging_type):
@@ -14269,7 +14523,7 @@ def _bucket_logging_type(logging_type):
     num_keys = 5
     for j in range(num_keys):
         name = 'myobject'+str(j)    
-        client.put_object(Bucket=src_bucket_name, Key=name, Body=name)
+        client.put_object(Bucket=src_bucket_name, Key=name, Body=randcontent())
         client.head_object(Bucket=src_bucket_name, Key=name)
     
     response = client.list_objects_v2(Bucket=src_bucket_name)
@@ -14288,11 +14542,11 @@ def _bucket_logging_type(logging_type):
     response = client.get_object(Bucket=log_bucket_name, Key=key)
     body = _get_body(response)
     if logging_type == 'Journal':
-        assert _verify_records(body, src_bucket_name, 'REST.PUT.put_obj', src_keys)
-        assert _verify_records(body, src_bucket_name, 'REST.HEAD.get_obj', src_keys) == False
+        assert _verify_records(body, src_bucket_name, 'REST.PUT.put_obj', src_keys, 'Journal', num_keys)
+        assert _verify_records(body, src_bucket_name, 'REST.HEAD.get_obj', src_keys, 'Journal', num_keys) == False
     elif logging_type == 'Standard':
-        assert _verify_records(body, src_bucket_name, 'REST.HEAD.get_obj', src_keys)
-        assert _verify_records(body, src_bucket_name, 'REST.PUT.put_obj', src_keys)
+        assert _verify_records(body, src_bucket_name, 'REST.HEAD.get_obj', src_keys, 'Standard', num_keys)
+        assert _verify_records(body, src_bucket_name, 'REST.PUT.put_obj', src_keys, 'Standard', num_keys)
     else:
         assert False, 'invalid logging type:'+logging_type
 
@@ -14334,20 +14588,20 @@ def test_bucket_logging_roll_time():
     num_keys = 5
     for j in range(num_keys):
         name = 'myobject'+str(j)    
-        client.put_object(Bucket=src_bucket_name, Key=name, Body=name)
+        client.put_object(Bucket=src_bucket_name, Key=name, Body=randcontent())
 
     response = client.list_objects_v2(Bucket=src_bucket_name)
     src_keys = _get_keys(response)
 
     time.sleep(roll_time/2)
-    client.put_object(Bucket=src_bucket_name, Key='myobject', Body='myobject')
+    client.put_object(Bucket=src_bucket_name, Key='myobject', Body=randcontent())
 
     response = client.list_objects_v2(Bucket=log_bucket_name)
     keys = _get_keys(response)
     assert len(keys) == 0
 
     time.sleep(roll_time/2)
-    client.put_object(Bucket=src_bucket_name, Key='myobject', Body='myobject')
+    client.put_object(Bucket=src_bucket_name, Key='myobject', Body=randcontent())
 
     response = client.list_objects_v2(Bucket=log_bucket_name)
     keys = _get_keys(response)
@@ -14357,20 +14611,20 @@ def test_bucket_logging_roll_time():
     assert key.startswith('log/')
     response = client.get_object(Bucket=log_bucket_name, Key=key)
     body = _get_body(response)
-    assert _verify_records(body, src_bucket_name, 'REST.PUT.put_obj', src_keys)
+    assert _verify_records(body, src_bucket_name, 'REST.PUT.put_obj', src_keys, 'Standard', num_keys)
     client.delete_object(Bucket=log_bucket_name, Key=key)
     
     num_keys = 25
     for j in range(num_keys):
         name = 'myobject'+str(j)    
-        client.put_object(Bucket=src_bucket_name, Key=name, Body=name)
+        client.put_object(Bucket=src_bucket_name, Key=name, Body=randcontent())
         time.sleep(1)
     
     response = client.list_objects_v2(Bucket=src_bucket_name)
     src_keys = _get_keys(response)
     
     time.sleep(roll_time)
-    client.put_object(Bucket=src_bucket_name, Key='myobject', Body='myobject')
+    client.put_object(Bucket=src_bucket_name, Key='myobject', Body=randcontent())
 
     response = client.list_objects_v2(Bucket=log_bucket_name)
     keys = _get_keys(response)
@@ -14381,7 +14635,7 @@ def test_bucket_logging_roll_time():
         assert key.startswith('log/')
         response = client.get_object(Bucket=log_bucket_name, Key=key)
         body += _get_body(response)
-    assert _verify_records(body, src_bucket_name, 'REST.PUT.put_obj', src_keys)
+    assert _verify_records(body, src_bucket_name, 'REST.PUT.put_obj', src_keys, 'Standard', num_keys+1)
 
 
 @pytest.mark.bucket_logging
@@ -14410,7 +14664,7 @@ def test_bucket_logging_multiple_prefixes():
     for src_bucket_name in buckets:
         for j in range(num_keys):
             name = 'myobject'+str(j)    
-            client.put_object(Bucket=src_bucket_name, Key=name, Body=name)
+            client.put_object(Bucket=src_bucket_name, Key=name, Body=randcontent())
 
     time.sleep(5)
     for src_bucket_name in buckets:
@@ -14429,7 +14683,7 @@ def test_bucket_logging_multiple_prefixes():
                 found = True
                 response = client.list_objects_v2(Bucket=src_bucket_name)
                 src_keys = _get_keys(response)
-                assert _verify_records(body, src_bucket_name, 'REST.PUT.put_obj', src_keys)
+                assert _verify_records(body, src_bucket_name, 'REST.PUT.put_obj', src_keys, 'Standard', num_keys)
         assert found
 
 
@@ -14462,7 +14716,7 @@ def test_bucket_logging_single_prefix():
         bucket_ind += 1
         for j in range(num_keys):
             name = 'myobject'+str(bucket_ind)+str(j)    
-            client.put_object(Bucket=src_bucket_name, Key=name, Body=name)
+            client.put_object(Bucket=src_bucket_name, Key=name, Body=randcontent())
 
     time.sleep(5)
     client.put_object(Bucket=buckets[0], Key='dummy', Body='dummy')
@@ -14478,5 +14732,5 @@ def test_bucket_logging_single_prefix():
     for src_bucket_name in buckets:
         response = client.list_objects_v2(Bucket=src_bucket_name)
         src_keys = _get_keys(response)
-        found = _verify_records(body, src_bucket_name, 'REST.PUT.put_obj', src_keys)
+        found = _verify_records(body, src_bucket_name, 'REST.PUT.put_obj', src_keys, 'Standard', num_keys)
     assert found
