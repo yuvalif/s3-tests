@@ -16445,6 +16445,12 @@ def _bucket_logging_mpu(versioned):
     body = _get_body(response)
     record_type = 'Standard' if not has_extensions else 'Journal'
     assert _verify_records(body, src_bucket_name, 'REST.POST.UPLOAD', [src_key, src_key], record_type, expected_count)
+    if record_type == 'Standard':
+        if versioned:
+            expected_count = 12
+        else:
+            expected_count = 6
+        assert _verify_records(body, src_bucket_name, 'REST.PUT.PART', [src_key, src_key], record_type, expected_count)
 
 
 @pytest.mark.bucket_logging
